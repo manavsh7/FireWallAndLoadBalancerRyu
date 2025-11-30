@@ -1,0 +1,243 @@
+SDN-based Adaptive Load Balancer + Firewall using Ryu & Mininet
+
+Unified SDN application for dynamic traffic distribution and security policy enforcement.
+
+
+
+Team: Sanskar Pal · Pratham Saxena · Manav Sharma
+
+Goal: Unify Security and Traffic Management via SDN
+
+Adaptive Load Balancing
+
+Implement dynamic traffic distribution across multiple servers based on real-time performance metrics.
+
+Integrated Firewall
+
+Unify firewall and load balancer functionalities within a single, centralized controller application (Ryu).
+
+Efficiency & Security
+
+Reduce reliance on manual configurations, leading to improved performance and centralized security policy management.
+
+
+
+The Software-Defined Networking (SDN) approach allows for centralized control, rapid programmability, and fast policy updates, which is essential for adaptive systems.
+
+
+
+Testbed & Core Technology Stack
+
+Our environment utilizes industry-standard SDN tools to emulate a realistic network environment and provide programmable control.
+
+
+
+
+
+Network Emulation: Mininet
+
+Used to create the virtual network topology (hosts, switches, links) via its Python API (e.g., net.addHost, addSwitch, addLink).
+
+
+
+
+
+Data Plane: Open vSwitch (OVS)
+
+Acts as the programmable network device, implementing the forwarding behavior driven by the controller using the OpenFlow protocol.
+
+
+
+
+
+Controller Logic: Ryu (Python)
+
+The core application logic, utilizing Python and managing flow tables via OpenFlow 1.3 protocol commands.
+
+
+
+
+
+Testing & Monitoring
+
+Tools like ping, iperf, and ApacheBench (ab) are used to generate traffic and measure performance metrics.
+
+
+
+Firewall Implementation: Stateless ACLs
+
+The firewall functionality is achieved by installing specific flow rules (FLOW_MOD) in the Open vSwitch, enabling centralized access control.
+
+Mechanism: Stateless L3/L4 Access Control Lists (ACLs) installed by the controller.
+
+Default Behavior: A final, low-priority rule implements a default drop policy for all traffic not explicitly allowed.
+
+Policy Enforcement: Specific rules allow or deny traffic based on source/destination IPs, and TCP/UDP ports.
+
+Rule Building: Rules are constructed using OpenFlow structures, such as parser.OFPMatch(...), and installed via OFPFlowMod.
+
+Verification is crucial and performed via REST API calls like /stats/flow/{dpid} to inspect switch flow tables.
+
+
+
+Load Balancer Method: From Round-Robin to Adaptive
+
+We are transitioning from a simple, deterministic approach to a dynamic one that responds to real-time server load.
+
+Phase 1: Basic Round-Robin
+
+Initial implementation uses a straightforward distribution method for baseline testing and comparison.
+
+Path A: Group Table Optimization
+
+Utilizes OpenFlow GROUP_MOD (SELECT) tables with weighted buckets directed toward specific server ports. (Preferred method)
+
+Path B: Controller Steering
+
+Fallback method where the controller handles load balancing per-flow, triggered by a PACKET_IN event for new connections. (Higher latency)
+
+Phase 2: Adaptive Policy
+
+Implement logic to dynamically adjust the weights within the group table based on monitored server load or performance metrics.
+
+
+
+Adaptation & Monitoring: The Control Loop
+
+Adaptive policy requires continuous monitoring of data plane metrics to make informed decisions about traffic distribution.
+
+Poll & Monitor
+
+Analyze Metrics
+
+Update Groups/Flows
+
+Forward Traffic
+
+Data Collection
+
+We pull statistics using the Ryu REST APIs (/stats/port and /stats/flow) to gather throughput and usage data.
+
+Metrics Analyzed
+
+Key performance indicators include server throughput, Round-Trip Time (RTT), and error rates measured via ApacheBench (ab).
+
+Policy Adjustment
+
+When performance thresholds are exceeded, the policy loop adjusts Group Table bucket weights or installs new flow entries to rebalance the load.
+
+
+
+SDN Topology Diagram
+
+Ryu Controller
+
+Manages OVS via OpenFlow control channel
+
+Servers
+
+Server A, B, and C connected
+
+Control Messages
+
+PACKET_IN and FLOW_MOD/GROUP_MOD
+
+Clients
+
+Three clients via VIP/Port
+
+
+
+The OVS is the central point of policy enforcement. The controller communicates policy updates via OpenFlow, while data packets flow through the switch.
+
+Test Plan: Validating Functionality
+
+Our validation process confirms both firewall security and load balancing efficiency under various conditions.
+
+
+
+Connectivity Test
+
+Verify basic network reachability using ping from clients to the VIP (Virtual IP) and direct communication to all backend servers.
+
+
+
+Firewall Efficacy Test
+
+Attempt traffic initiation (e.g., iperf or curl) using blocked source IPs or restricted TCP/UDP ports, confirming immediate packet drops.
+
+
+
+Load Distribution Test
+
+Execute multi-client load tests (ab or iperf) to verify even traffic distribution across servers A, B, and C during normal operation.
+
+
+
+Adaptive Overload Scenario
+
+Saturate Server A's capacity to trigger the policy loop, confirming that subsequent traffic is rebalanced successfully to the underutilized Servers B and C.
+
+
+
+Timeline, Roles, and Risk Management
+
+We have established roles and identified potential challenges to ensure project completion on schedule.
+
+Project Status
+
+Done: Environment setup, basic firewall functionality, and initial Round-Robin LB.
+
+Next: Merge applications, implement stats polling, and develop adaptive weighting logic.
+
+Team Roles & Focus
+
+
+
+Sanskar Pal
+
+Topology design and system integration.
+
+
+
+Pratham Saxena
+
+Firewall implementation and REST API policy interface.
+
+
+
+Manav Sharma
+
+Load balancing logic, adaptive algorithm, and performance metrics.
+
+Key Risk: Open vSwitch version limitations regarding Group Table functionality. Mitigation: Fall back to controller-steered flow installations (Path B).
+
+
+
+
+
+Conclusion & Future Work
+
+Project Summary
+
+Established a foundational SDN environment.
+
+Integrated a basic firewall with OpenFlow rules and a functional Round-Robin load balancer.
+
+Laid the groundwork for adaptive weighting logic, addressing initial Open vSwitch limitations.
+
+Next Steps & Vision
+
+Future work involves merging applications.
+
+Implementing statistics polling.
+
+Developing adaptive weighting logic for dynamic traffic management.
+
+This project showcases SDN's potential for agile, secure, and adaptable network services.
+
+
+
+Thank You!
+
+Sanskar Pal, Pratham Saxena, Manav Sharma
