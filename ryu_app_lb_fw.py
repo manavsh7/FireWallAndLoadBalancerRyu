@@ -24,6 +24,8 @@ import struct
 import threading
 import time
 import random
+import socket
+from ryu.lib import hub
 
 # ============================================================================
 # Configuration Constants
@@ -72,6 +74,14 @@ ENABLE_ADAPTIVE_LB = False  # Set to True to enable adaptive load balancing
 STATS_POLL_INTERVAL = 5  # Seconds between statistics polling
 ADAPTIVE_THRESHOLD = 0.8  # Load threshold to trigger rebalancing (0.0-1.0)
 
+# Health Check Configuration
+ENABLE_HEALTH_CHECK = True # Set to True to enable health checking
+HEALTH_CHECK_INTERVAL = 5 # Seconds between health checks
+HEALTH_CHECK_TIMEOUT = 1 # Seconds for health check connection timeout
+FAILURE_THRESHOLD = 3 # Consecutive failures before marking server DOWN
+SUCCESS_THRESHOLD = 2 # Consecutive successes before marking server UP
+HEALTH_CHECK_PORT = 80 # TCP port to check on backend servers (e.g., HTTP)
+
 # ============================================================================
 # Main Application Class
 # ============================================================================
@@ -116,6 +126,11 @@ class UnifiedLBFW(app_manager.RyuApp):
             self.backend_weights[backend_ip] = 1.0
             self.backend_load[backend_ip] = 0.0
         
+        # Health check status
+        self.backend_health = {ip: 'UP' for ip in self.backend_list}
+        self.backend_failure_count = {ip: 0 for ip in self.backend_list}
+        self.backend_success_count = {ip: 0 for ip in self.backend_list}
+
         # Lock for thread-safe operations
         self.lock = threading.Lock()
         
@@ -123,6 +138,11 @@ class UnifiedLBFW(app_manager.RyuApp):
         if ENABLE_ADAPTIVE_LB:
             self.logger.info("Adaptive load balancing enabled")
             self._start_adaptive_polling()
+
+        # Start health checking thread if enabled
+        if ENABLE_HEALTH_CHECK:
+            self.logger.info("Health checking enabled")
+            self._start_health_checking()
 
     # ========================================================================
     # OpenFlow Event Handlers
@@ -339,16 +359,29 @@ class UnifiedLBFW(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
-        # Select backend server using round-robin or weighted selection
+        # Get list of currently UP backend servers
+        with self.lock:
+            up_backends = [ip for ip, status in self.backend_health.items() if status == 'UP']
+
+        if not up_backends:
+            self.logger.warning("No UP backend servers available to handle VIP traffic. Dropping packet.")
+            return # Drop packet
+
+        selected_backend = None
         if ENABLE_ADAPTIVE_LB:
-            # Use weighted selection based on current load
+            # Use weighted selection based on current load (only from UP servers)
             selected_backend = self._select_backend_adaptive()
         else:
-            # Use simple round-robin
+            # Use simple round-robin from UP servers
             with self.lock:
-                selected_backend = self.backend_list[self.lb_counter % len(self.backend_list)]
-                self.lb_counter += 1
+                # Ensure the counter wraps around correctly for only UP backends
+                self.lb_counter = (self.lb_counter + 1) % len(up_backends)
+                selected_backend = up_backends[self.lb_counter]
 
+        if selected_backend is None:
+            self.logger.warning("Load balancer failed to select a backend (possibly no healthy servers). Dropping packet.")
+            return # Should be handled by up_backends check, but as a safeguard
+            
         # Get backend server info
         backend_info = BACKEND_SERVERS[selected_backend]
         backend_mac = backend_info['mac']
@@ -842,14 +875,22 @@ class UnifiedLBFW(app_manager.RyuApp):
         """
         Select backend server using weighted random selection.
         Servers with lower load (higher weight) are more likely to be selected.
+        Only selects from currently UP servers.
         """
         with self.lock:
-            # Get current weights
-            weights = [self.backend_weights.get(ip, 1.0) for ip in self.backend_list]
+            # Filter out DOWN servers
+            available_backends = [ip for ip in self.backend_list if self.backend_health[ip] == 'UP']
+            
+            if not available_backends:
+                self.logger.warning("No UP backend servers available for adaptive LB.")
+                return None
+
+            # Get current weights for available backends
+            weights = [self.backend_weights.get(ip, 1.0) for ip in available_backends]
             
             # Weighted random selection
             # random.choices returns a list, we take the first element
-            selected = random.choices(self.backend_list, weights=weights, k=1)[0]
+            selected = random.choices(available_backends, weights=weights, k=1)[0]
             
             # Log selection for debugging
             load = self.backend_load.get(selected, 0.0)
@@ -858,4 +899,74 @@ class UnifiedLBFW(app_manager.RyuApp):
                             selected, load, weight)
             
             return selected
+
+    # ========================================================================
+    # Health Checking (Optional)
+    # ========================================================================
+
+    def _start_health_checking(self):
+        """Start a greenlet for periodic health checking of backend servers."""
+        # Use ryu.lib.hub to spawn a greenlet (cooperative thread)
+        # This is preferred over threading.Thread in Ryu for better integration
+        hub.spawn(self._health_check_loop)
+        self.logger.info("Started backend health checking loop")
+
+    def _health_check_loop(self):
+        """
+        Main loop for health checking.
+        Periodically checks the health of each backend server.
+        """
+        while True:
+            for backend_ip in list(self.backend_list): # Iterate over a copy
+                self._perform_health_check(backend_ip)
+            hub.sleep(HEALTH_CHECK_INTERVAL)
+
+    def _perform_health_check(self, backend_ip):
+        """
+        Performs a single health check on a given backend server.
+        Updates its health status based on TCP connection attempt.
+        """
+        is_healthy = False
+        try:
+            # Attempt to establish a TCP connection to the HEALTH_CHECK_PORT
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(HEALTH_CHECK_TIMEOUT)
+            sock.connect((backend_ip, HEALTH_CHECK_PORT))
+            sock.close()
+            is_healthy = True
+        except socket.timeout:
+            self.logger.debug("Health check: %s:%s timed out", backend_ip, HEALTH_CHECK_PORT)
+        except ConnectionRefusedError:
+            self.logger.debug("Health check: %s:%s connection refused", backend_ip, HEALTH_CHECK_PORT)
+        except Exception as e:
+            self.logger.debug("Health check: %s:%s error - %s", backend_ip, HEALTH_CHECK_PORT, e)
+
+        with self.lock:
+            current_status = self.backend_health[backend_ip]
+
+            if is_healthy:
+                self.backend_failure_count[backend_ip] = 0
+                self.backend_success_count[backend_ip] += 1
+                
+                if current_status == 'DOWN' and self.backend_success_count[backend_ip] >= SUCCESS_THRESHOLD:
+                    self.backend_health[backend_ip] = 'UP'
+                    self.backend_success_count[backend_ip] = 0
+                    self.logger.info("Backend %s:%s is UP again.", backend_ip, HEALTH_CHECK_PORT)
+                elif current_status == 'UP':
+                    # If already UP, just reset success count to avoid overflow
+                    # or keep it capped at SUCCESS_THRESHOLD
+                    self.backend_success_count[backend_ip] = SUCCESS_THRESHOLD # Cap it
+            else: # Not healthy
+                self.backend_success_count[backend_ip] = 0
+                self.backend_failure_count[backend_ip] += 1
+                
+                if current_status == 'UP' and self.backend_failure_count[backend_ip] >= FAILURE_THRESHOLD:
+                    self.backend_health[backend_ip] = 'DOWN'
+                    self.backend_failure_count[backend_ip] = 0
+                    self.logger.warning("Backend %s:%s is DOWN.", backend_ip, HEALTH_CHECK_PORT)
+                elif current_status == 'DOWN':
+                    # If already DOWN, just reset failure count to avoid overflow
+                    # or keep it capped at FAILURE_THRESHOLD
+                    self.backend_failure_count[backend_ip] = FAILURE_THRESHOLD # Cap it
+
 

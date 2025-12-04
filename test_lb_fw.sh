@@ -21,6 +21,11 @@ SERVER1="10.0.0.11"
 SERVER2="10.0.0.12"
 SERVER3="10.0.0.13"
 
+# Health Check Configuration (must match ryu_app_lb_fw.py)
+HEALTH_CHECK_INTERVAL=5
+FAILURE_THRESHOLD=3
+SUCCESS_THRESHOLD=2
+
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}SDN Load Balancer + Firewall Test Suite${NC}"
 echo -e "${GREEN}========================================${NC}"
@@ -175,6 +180,65 @@ echo "  h3 → $h3_result"
 echo -e "${GREEN}✓ Multiple clients test completed${NC}"
 echo ""
 
+# Test 9: Health Monitoring Verification
+echo -e "${GREEN}[Test 9] Health Monitoring Verification${NC}"
+
+TARGET_SERVER_IP="$SERVER1" # e.g., 10.0.0.11 (h4)
+TARGET_SERVER_HOST="h4"
+HEALTH_CHECK_WAIT_TIME_DOWN=$((HEALTH_CHECK_INTERVAL * FAILURE_THRESHOLD + 2)) # Add a buffer
+HEALTH_CHECK_WAIT_TIME_UP=$((HEALTH_CHECK_INTERVAL * SUCCESS_THRESHOLD + 2)) # Add a buffer
+
+echo "Initial load balancing to establish flows..."
+for i in {1..3}; do curl -s $VIP > /dev/null; sleep 0.1; done
+sleep 1 # Give controller some time
+
+echo "Bringing down $TARGET_SERVER_HOST ($TARGET_SERVER_IP)..."
+# Find and kill the http.server process on the host
+$TARGET_SERVER_HOST pkill -f "python3 -m http.server 80"
+echo "Waiting ${HEALTH_CHECK_WAIT_TIME_DOWN}s for health checks to mark $TARGET_SERVER_HOST as DOWN..."
+sleep $HEALTH_CHECK_WAIT_TIME_DOWN
+
+echo "Verifying traffic redirection (no traffic to $TARGET_SERVER_HOST)..."
+server_h4_down_test_count=0
+for i in {1..5}; do
+    response=$(curl -s $VIP)
+    if echo "$response" | grep -q "Server $TARGET_SERVER_HOST"; then
+        server_h4_down_test_count=$((server_h4_down_test_count + 1))
+    fi
+    sleep 0.1
+done
+
+if [ "$server_h4_down_test_count" -eq 0 ]; then
+    echo -e "${GREEN}✓ Traffic successfully redirected from DOWN server $TARGET_SERVER_HOST${NC}"
+else
+    echo -e "${RED}✗ Traffic still directed to DOWN server $TARGET_SERVER_HOST ($server_h4_down_test_count requests)${NC}"
+fi
+
+echo "Bringing up $TARGET_SERVER_HOST ($TARGET_SERVER_IP) again..."
+# Restart the HTTP server
+# Note: The original topo_lb_fw.py creates the http.server log in /tmp.
+# Ensure consistent logging if needed.
+$TARGET_SERVER_HOST python3 -m http.server 80 & > /tmp/${TARGET_SERVER_HOST}_http.log 2>&1 &
+echo "Waiting ${HEALTH_CHECK_WAIT_TIME_UP}s for health checks to mark $TARGET_SERVER_HOST as UP..."
+sleep $HEALTH_CHECK_WAIT_TIME_UP
+
+echo "Verifying traffic resumption to $TARGET_SERVER_HOST..."
+server_h4_up_test_count=0
+for i in {1..5}; do
+    response=$(curl -s $VIP)
+    if echo "$response" | grep -q "Server $TARGET_SERVER_HOST"; then
+        server_h4_up_test_count=$((server_h4_up_test_count + 1))
+    fi
+    sleep 0.1
+done
+
+if [ "$server_h4_up_test_count" -gt 0 ]; then
+    echo -e "${GREEN}✓ Traffic successfully resumed to UP server $TARGET_SERVER_HOST ($server_h4_up_test_count requests)${NC}"
+else
+    echo -e "${RED}✗ Traffic NOT resumed to UP server $TARGET_SERVER_HOST${NC}"
+fi
+echo ""
+
 # Summary
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Test Suite Completed${NC}"
@@ -185,4 +249,3 @@ echo "  - Check Ryu controller logs for firewall and LB decisions"
 echo "  - Inspect server logs: cat /tmp/hX_http.log"
 echo "  - View flow table: dpctl dump-flows"
 echo ""
-
